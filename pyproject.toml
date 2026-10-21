@@ -1,0 +1,37 @@
+[project]
+name = "tinybark"
+version = "0.1.0"
+description = "Underdog Bark 3.0 Clean speech-to-text on tinygrad"
+requires-python = ">=3.12"
+license = "MIT"
+dependencies = [
+  "constriction",
+  "huggingface-hub",
+  "numpy",
+  "tinygrad @ git+https://github.com/tinygrad/tinygrad@45fc5ae734a2673c7837835f25e5dbab8b1385d7",
+]
+
+[dependency-groups]
+# The PyTorch reference the tests compare against, set up as stt's bark.py runs it.
+dev = ["librosa", "pytest", "torch", "transformers>=5.19"]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.pytest.ini_options]
+addopts = "-s"
+# transformers' generate() notice, also printed by stt's bark.py.
+filterwarnings = ["ignore:Using the model-agnostic default `max_length`:UserWarning"]
+testpaths = ["tests"]
+
+[build-system]
+requires = ["uv_build>=0.9,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = ""
