@@ -8,12 +8,21 @@ dependencies = [
   "constriction",
   "huggingface-hub",
   "numpy",
+  "onnxruntime>=1.31.0",
+  "safetensors>=0.8.0",
   "tinygrad @ git+https://github.com/tinygrad/tinygrad@45fc5ae734a2673c7837835f25e5dbab8b1385d7",
 ]
 
 [dependency-groups]
 # The PyTorch reference the tests compare against, set up as stt's bark.py runs it.
-dev = ["librosa", "pytest", "torch", "transformers>=5.19"]
+dev = [
+    "librosa",
+    "onnx>=1.23.2",
+    "onnxscript>=0.7.2",
+    "pytest",
+    "torch",
+    "transformers>=5.19",
+]
 
 [tool.uv.sources]
 torch = { index = "pytorch-cpu" }

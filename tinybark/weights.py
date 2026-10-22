@@ -41,6 +41,24 @@ def tokenizer_file() -> str:
     return hf_hub_download(TOKENIZER_REPO, "tokenizer.json")
 
 
+def decoded() -> tuple[dict[str, np.ndarray], dict]:
+    """Bark's state dict as its loader decodes it, and its config. Decoding the
+    entropy-coded weights takes about 15 s, so the result is cached as safetensors."""
+    from safetensors.numpy import load_file, save_file
+
+    CACHE.mkdir(parents=True, exist_ok=True)
+    path = CACHE / f"bark-{REVISION[:12]}-decoded.safetensors"
+    if not path.exists():
+        sd, config = bark_loader().load_state_dict(bark_file(), as_numpy=True)
+        tmp = path.with_suffix(".tmp")
+        save_file({k: np.ascontiguousarray(v) for k, v in sd.items()}, str(tmp), metadata={"config": json.dumps(config)})
+        tmp.rename(path)
+    with open(path, "rb") as file:
+        n = int.from_bytes(file.read(8), "little")
+        config = json.loads(json.loads(file.read(n))["__metadata__"]["config"])
+    return load_file(str(path)), config
+
+
 def _convert(sd: dict[str, np.ndarray], config: dict) -> dict[str, np.ndarray]:
     """Fuses q/k/v and each LSTM layer's input and hidden weights, folds each conv
     module's batch norm into its depthwise conv, and splits the joint head into a
@@ -91,7 +109,7 @@ def load() -> tuple[dict[str, Tensor], dict]:
     name = f"bark-{REVISION[:12]}-v{FORMAT}"
     path, config_path = CACHE / f"{name}.safetensors", CACHE / f"{name}.json"
     if not path.exists():
-        sd, config = bark_loader().load_state_dict(bark_file(), as_numpy=True)
+        sd, config = decoded()
         sd = {k: v.astype(np.float32) for k, v in sd.items() if v.dtype.kind == "f"}
         sd = _convert(sd, config)
         tmp = path.with_suffix(".tmp")
