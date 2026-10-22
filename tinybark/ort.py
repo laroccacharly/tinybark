@@ -1,5 +1,7 @@
-"""Bark on ONNX Runtime (CPU), from graphs exported by `export.py` and cached in
-~/.cache/tinybark. Any audio length runs on the same graphs: no warm-up per length.
+"""Bark on ONNX Runtime, from graphs exported by `export.py` and cached in
+~/.cache/tinybark: the encoder on the GPU through WebGPU (Vulkan), the decoder
+and joint on the CPU, where their small per-step calls are fastest. Any audio
+length runs on the same graphs: no warm-up per length.
 
     bark = tinybark.ort.load()
     text = bark.transcribe(samples)  # 16 kHz mono float32 NumPy array
@@ -16,7 +18,7 @@ from . import audio, weights
 from .text import Tokenizer
 
 # Bump when export.py changes, so stale graphs aren't loaded.
-FORMAT = 1
+FORMAT = 2
 # Token <|endoftext|>, generation_config.json's eos_token_id: generate() stops on it.
 EOS = 3
 
@@ -42,9 +44,8 @@ class Bark:
         options = ort.SessionOptions()
         # One thread per physical core: SMT siblings slow the matmuls down.
         options.intra_op_num_threads = max(1, (os.cpu_count() or 2) // 2)
-        self.encoder, self.decoder, self.joint = (
-            ort.InferenceSession(path / f"{name}.onnx", options, providers=["CPUExecutionProvider"]) for name in ("encoder", "decoder", "joint")
-        )
+        self.encoder = ort.InferenceSession(path / "encoder.onnx", options, providers=["WebGpuExecutionProvider", "CPUExecutionProvider"])
+        self.decoder, self.joint = (ort.InferenceSession(path / f"{name}.onnx", options, providers=["CPUExecutionProvider"]) for name in ("decoder", "joint"))
         self.tokenizer = Tokenizer(weights.tokenizer_file())
 
     def tokens(self, samples: np.ndarray) -> list[int]:

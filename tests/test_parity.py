@@ -74,16 +74,16 @@ def onnx() -> dict:
     load = time.perf_counter() - start
     first, _ = timed(lambda: bark.tokens(SAMPLES), 1)
     times, tokens = timed(lambda: bark.tokens(SAMPLES), RUNS)
-    return {"name": "onnxruntime (fp32, CPU)", "load": load, "first": first[0], "times": times, "tokens": tokens, "text": bark.tokenizer.decode(tokens)}
+    return {"name": "onnxruntime (fp16, WebGPU)", "load": load, "first": first[0], "times": times, "tokens": tokens, "text": bark.tokenizer.decode(tokens)}
 
 
 def report(results: list[dict]) -> None:
     seconds = len(SAMPLES) / 16_000
     print(f"\n{seconds:.2f} s of audio, median of {RUNS} warm runs")
-    print(f"| {'':24} | {'load s':>7} | {'first s':>7} | {'median s':>8} | {'x realtime':>10} |")
+    print(f"| {'':26} | {'load s':>7} | {'first s':>7} | {'median s':>8} | {'x realtime':>10} |")
     for r in results:
         median = statistics.median(r["times"])
-        print(f"| {r['name']:24} | {r['load']:7.2f} | {r['first']:7.2f} | {median:8.3f} | {seconds / median:10.0f} |")
+        print(f"| {r['name']:26} | {r['load']:7.2f} | {r['first']:7.2f} | {median:8.3f} | {seconds / median:10.0f} |")
     for r in results:
         print(f"{r['name']}: {r['text']!r}")
 

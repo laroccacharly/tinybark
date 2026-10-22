@@ -8,10 +8,14 @@ dependencies = [
   "constriction",
   "huggingface-hub",
   "numpy",
-  "onnxruntime>=1.31.0",
+  "onnxruntime-webgpu>=1.27.0",
   "safetensors>=0.8.0",
   "tinygrad @ git+https://github.com/tinygrad/tinygrad@45fc5ae734a2673c7837835f25e5dbab8b1385d7",
 ]
+
+[project.optional-dependencies]
+# Exporting the ONNX graphs on first use (tinybark.ort.load()).
+export = ["onnx", "onnxscript", "torch", "transformers>=5.19"]
 
 [dependency-groups]
 # The PyTorch reference the tests compare against, set up as stt's bark.py runs it.
