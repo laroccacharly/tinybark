@@ -1,6 +1,8 @@
 # tinybark
 
-Benchmarks of [Underdog Bark 3.0 Clean](https://huggingface.co/ConwayResearch/Underdog-Bark-3.0-Clean) speech-to-text (a Parakeet TDT 0.6B fine-tune) on four GPU backends, one folder each under `tinybark/`: [PyTorch](https://pytorch.org) (eager and `torch.compile`), [tinygrad](https://github.com/tinygrad/tinygrad), [ONNX Runtime](https://onnxruntime.ai) with WebGPU, and [Mojo](https://www.modular.com/mojo). Each one is also usable as a library.
+**Model: [Underdog Bark 3.0 Clean](https://huggingface.co/ConwayResearch/Underdog-Bark-3.0-Clean)** by Conway Research, a speech-to-text fine-tune of [NVIDIA Parakeet TDT 0.6B v3](https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3).
+
+Benchmarks of that model on four backends, on the GPU and the CPU, one folder each under `tinybark/`: [PyTorch](https://pytorch.org) (eager and `torch.compile`), [tinygrad](https://github.com/tinygrad/tinygrad), [ONNX Runtime](https://onnxruntime.ai) with WebGPU, and [Mojo](https://www.modular.com/mojo). Each one is also usable as a library.
 
 ## Requirements
 
