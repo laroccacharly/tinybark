@@ -14,8 +14,8 @@ from pathlib import Path
 import numpy as np
 import onnxruntime as ort
 
-from . import audio, weights
-from .text import Tokenizer
+from .. import audio, weights
+from ..text import Tokenizer
 
 # Bump when export.py changes, so stale graphs aren't loaded.
 FORMAT = 2
@@ -89,11 +89,15 @@ class Bark:
         return self.transcribe(np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768)
 
 
-def load() -> Bark:
-    """Exports the graphs on first use, which needs the dev dependencies (torch)."""
+def prepare() -> Path:
+    """Exports the graphs on first use (about a minute), which needs the `export` extra (torch)."""
     path = directory()
     if not (path / "config.json").exists():
         from . import export
 
         export.export(path)
-    return Bark(path)
+    return path
+
+
+def load() -> Bark:
+    return Bark(prepare())

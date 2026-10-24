@@ -21,7 +21,8 @@ from tinygrad import Device
 from tinygrad.device import Buffer
 from tinygrad.tensor import Tensor, all_tensors
 
-from .. import model, weights
+from ... import weights
+from .. import model
 
 # Covers dictation up to 30 s.
 MAX_SECONDS = 30.0

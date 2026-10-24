@@ -1,5 +1,6 @@
 """Bark's weights: downloaded from Hugging Face, decoded once with Bark's own
-loader, then cached as fp16 safetensors in the layout `model.py` uses."""
+loader, then cached as fp16 safetensors in the layout the tinygrad and Mojo
+backends read."""
 
 import importlib.util
 import json
@@ -8,7 +9,6 @@ from pathlib import Path
 
 import numpy as np
 from huggingface_hub import hf_hub_download
-from tinygrad import Tensor, dtypes
 
 # Pinned so a change upstream can't alter what gets downloaded.
 REPO = "ConwayResearch/Underdog-Bark-3.0-Clean"
@@ -103,8 +103,8 @@ def _save(tensors: dict[str, np.ndarray], path: Path) -> None:
             file.write(value.astype(np.float16).tobytes())
 
 
-def load() -> tuple[dict[str, Tensor], dict]:
-    """The model's tensors (fp16, on the default device) and its config."""
+def converted() -> tuple[Path, dict]:
+    """The converted fp16 safetensors file and the model's config, made on first use (about 23 s)."""
     CACHE.mkdir(parents=True, exist_ok=True)
     name = f"bark-{REVISION[:12]}-v{FORMAT}"
     path, config_path = CACHE / f"{name}.safetensors", CACHE / f"{name}.json"
@@ -117,17 +117,4 @@ def load() -> tuple[dict[str, Tensor], dict]:
         del sd
         tmp.rename(path)
         config_path.write_text(json.dumps(config))
-    # One read of the whole data block, then one realize that assigns each tensor
-    # its own buffer: tinygrad's per-tensor disk reads take ~10 s, and kernels
-    # reading views into one big buffer are slower.
-    disk = Tensor.empty(path.stat().st_size, dtype=dtypes.uint8, device=f"disk:{path}")
-    n = int.from_bytes(disk[:8].data(), "little")
-    header = json.loads(bytes(disk[8 : 8 + n].data()))
-    data = disk[8 + n :].bitcast(dtypes.half).to(None).realize()
-    tensors = {}
-    for name, info in header.items():
-        start, end = (o // 2 for o in info["data_offsets"])
-        tensors[name] = Tensor.empty(*info["shape"], dtype=dtypes.half).assign(data[start:end].reshape(info["shape"]))
-    Tensor.realize(*tensors.values())
-    del data
-    return tensors, json.loads(config_path.read_text())
+    return path, json.loads(config_path.read_text())

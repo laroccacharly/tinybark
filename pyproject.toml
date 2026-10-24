@@ -1,8 +1,9 @@
 [project]
 name = "tinybark"
 version = "0.1.0"
-description = "Underdog Bark 3.0 Clean speech-to-text on tinygrad"
-requires-python = ">=3.12"
+description = "Underdog Bark 3.0 Clean speech-to-text on tinygrad, ONNX Runtime, PyTorch and Mojo"
+# No Mojo or MAX wheels for 3.15 yet.
+requires-python = ">=3.12,<3.15"
 license = "MIT"
 dependencies = [
   "constriction",
@@ -16,25 +17,37 @@ dependencies = [
 [project.optional-dependencies]
 # Exporting the ONNX graphs on first use (tinybark.ort.load()).
 export = ["onnx", "onnxscript", "torch", "transformers>=5.19"]
+# librosa: transformers' ParakeetFeatureExtractor needs it.
+pytorch = ["librosa", "torch", "transformers>=5.19"]
+# Pinned to the nightly tinybark-mojo was validated with (both clips, 6/6 runs).
+mojo = ["max==26.8.0.dev2026102305", "mojo==1.3.0.dev2026102305"]
 
 [dependency-groups]
-# The PyTorch reference the tests compare against, set up as stt's bark.py runs it.
 dev = [
-    "librosa",
-    "onnx>=1.23.2",
-    "onnxscript>=0.7.2",
-    "pytest",
-    "torch",
-    "transformers>=5.19",
+  "pytest",
+  "tinybark[export,pytorch,mojo]",
+  # Listed so it comes from the ROCm index too: sources only apply to direct dependencies.
+  "triton-rocm; sys_platform == 'linux'",
 ]
 
+[tool.uv]
+# The PyTorch and Modular indexes publish no upload times, so the global
+# exclude-newer cooldown would filter out every one of their wheels.
+exclude-newer-package = { torch = false, triton-rocm = false, mojo = false, mojo-compiler = false, max = false, max-core = false, max-mojo-libs = false, max-shmem-libs = false, mblack = false, mojo-lldb-libs = false, mojo-lsp-server = false, mojo-compiler-mojo-libs = false }
+
 [tool.uv.sources]
-torch = { index = "pytorch-cpu" }
+tinybark = { workspace = true }
+torch = { index = "pytorch-rocm" }
+triton-rocm = { index = "pytorch-rocm" }
 
 [[tool.uv.index]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
+name = "pytorch-rocm"
+url = "https://download.pytorch.org/whl/rocm7.2"
 explicit = true
+
+[[tool.uv.index]]
+name = "modular-nightly"
+url = "https://whl.modular.com/nightly/simple/"
 
 [tool.pytest.ini_options]
 addopts = "-s"

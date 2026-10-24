@@ -1,40 +1,23 @@
-"""Dropped attempt: one symbolic-length graph instead of one graph per bucket.
-
-The number of 2.56 s blocks was a bound Variable, so a single encoder graph served
-every length up to 30.72 s and warm-up would have been one compile instead of one
-per bucket. It didn't work out on the Radeon 760M:
-- warm calls were 4-10x slower than the bucketed model: 0.63 s instead of
-  0.12-0.14 s on the 5.86 s clip, 7.5 s instead of 0.73 s on 29 s, nearly all
-  of it in the encoder;
-- it faulted the GPU (instruction-fetch page faults, then a GPU reset).
-Kept for reference; not imported by tinybark.
-
-Parakeet TDT (FastConformer encoder, LSTM prediction network, TDT joint) in
+"""Parakeet TDT (FastConformer encoder, LSTM prediction network, TDT joint) in
 tinygrad, matching transformers' ParakeetForTDT with greedy generate().
 
-Audio is padded to a multiple of BLOCK frames and masked. The number of blocks is
-a symbolic Variable, so one graph serves every length up to LIMIT: it compiles
-once and then replays through TinyJit. Longer audio gets a graph per multiple of
-LIMIT. Each conformer layer is a precompiled function, so the 24 identical layers
-are scheduled once."""
+Audio is padded to a few fixed lengths ("buckets") and masked, so each bucket
+compiles once and then replays through TinyJit."""
 
 import math
 
 import numpy as np
-from tinygrad import Tensor, TinyJit, Variable, dtypes, function
+from tinygrad import Tensor, TinyJit, Variable, dtypes
 from tinygrad.uop.ops import UOp
 
 from .. import audio
 
-# Audio is padded to a multiple of this many feature frames (10 ms each), 2.56 s:
-# 32 encoder frames, so its matmuls tile a symbolic length as well as a fixed one.
-BLOCK = 256
-# One graph covers up to this many feature frames, 30.72 s.
-LIMIT = 12 * BLOCK
+# Audio is padded to a multiple of this many feature frames (10 ms each), 2.56 s.
+BUCKET = 256
 
 
-def limit(frames: int) -> int:
-    return math.ceil(frames / LIMIT) * LIMIT
+def bucket(frames: int) -> int:
+    return math.ceil(frames / BUCKET) * BUCKET
 
 
 def subsampled(frames: int, convs: int) -> int:
@@ -90,17 +73,14 @@ class Parakeet:
         self.max_symbols = config["max_symbols_per_step"]
         # Token <|endoftext|>, generation_config.json's eos_token_id: generate() stops on it.
         self.eos = 3
-        # Per limit: the encoder and decoder-step JITs, the relative position keys, and
-        # the Variables for the number of blocks and the valid length after each of the
-        # three subsampling convs (their maximums size the buffers).
         self._encoders: dict[int, TinyJit] = {}
         self._steps: dict[int, TinyJit] = {}
         self._positions: dict[int, list[Tensor]] = {}
-        self._variables: dict[int, tuple[Variable, list[Variable]]] = {}
         # The LSTM state stays on the GPU: building inputs from NumPy costs more than a step.
         self._h = Tensor.zeros(self.decoder_layers, self.decoder_hidden).contiguous().realize()
         self._c = Tensor.zeros(self.decoder_layers, self.decoder_hidden).contiguous().realize()
         self._token = Variable("token", 0, self.vocab - 1)
+        self._lengths = [Variable(f"length{i}", 1, 1 << 20) for i in (1, 2, 3)]
 
     # Encoder
 
@@ -111,18 +91,14 @@ class Parakeet:
         for i, mask in zip((2, 5), masks[1:]):
             dw, pw = f"{p}layers.{i}.", f"{p}layers.{i + 1}."
             x = x.conv2d(w[dw + "weight"], w[dw + "bias"], groups=x.shape[1], stride=2, padding=1) * mask.half()
-            # The 1x1 conv as a matmul over channels: conv2d can't prove its shapes for a symbolic length.
-            x = x.permute(0, 2, 3, 1) @ w[pw + "weight"].reshape(x.shape[1], -1).T + w[pw + "bias"]
-            x = (x.permute(0, 3, 1, 2) * mask.half()).relu()
+            x = (x.conv2d(w[pw + "weight"], w[pw + "bias"]) * mask.half()).relu()
         b, c, t, f = x.shape
         x = x.permute(0, 2, 1, 3).reshape(b, t, c * f)
         return linear(x, w[p + "linear.weight"], w[p + "linear.bias"])
 
     def _attention(self, x: Tensor, p: str, rel: Tensor, key_mask: Tensor) -> Tensor:
-        """`rel` holds the relative position keys of the longest length, 2 * longest - 1 of them."""
         w = self.w
         b, t, _ = x.shape
-        longest = (rel.shape[-1] + 1) // 2
         h = self.heads
         d = self.hidden // h
         qkv = linear(x, w[p + "qkv"]).reshape(b, t, 3, h, d).permute(2, 0, 3, 1, 4)
@@ -130,14 +106,10 @@ class Parakeet:
         bias_u = w[p + "bias_u"].float().reshape(1, h, 1, d)
         bias_v = w[p + "bias_v"].float().reshape(1, h, 1, d)
         ac = (q + bias_u).half() @ k.half().transpose(-1, -2)
-        bd = (q + bias_v).half() @ rel[..., longest - t : longest + t - 1]
+        bd = (q + bias_v).half() @ rel
         # Relative shift (Transformer-XL appendix B), as ParakeetEncoderAttention._rel_shift.
-        # reshape can't prove a symbolic length's shapes, so the scores are padded to the
-        # longest length around it (the shift then lands on the same scores) and cut back.
-        pad = longest - t
-        bd = bd.pad((None, None, (0, pad), (pad, pad)))
-        n = 2 * longest - 1
-        bd = bd.pad((None, None, None, (1, 0))).reshape(b, h, n + 1, longest)[:, :, 1:].reshape(b, h, longest, n)[:, :, :t, :t]
+        n = bd.shape[-1]
+        bd = bd.pad((None, None, None, (1, 0))).reshape(b, h, n + 1, t)[:, :, 1:].reshape(b, h, t, n)[..., :t]
         scores = (ac.float() + bd.float()) * d**-0.5 + key_mask
         out = scores.softmax(-1).half() @ v.half()
         out = out.permute(0, 2, 1, 3).reshape(b, t, self.hidden)
@@ -157,8 +129,7 @@ class Parakeet:
 
     def _relative_keys(self, t: int) -> list[Tensor]:
         """Each layer's projected positional encodings, shape (1, heads, head_dim, 2t - 1).
-        They depend only on the length, so they're computed once per limit, for its
-        longest length; shorter lengths use the middle of them."""
+        They depend only on the length, so they're computed once per bucket."""
         if t not in self._positions:
             pos = Tensor(positions(t, self.hidden))
             h, d = self.heads, self.hidden // self.heads
@@ -166,42 +137,32 @@ class Parakeet:
             self._positions[t] = [r.reshape(1, -1, h, d).permute(0, 2, 3, 1).contiguous().realize() for r in rel]
         return self._positions[t]
 
-    def _encode(self, features: Tensor, blocks: UOp, *lengths: UOp) -> Tensor:
-        """Encoder frames projected for the joint, shape (limit / 8, decoder hidden).
-        `features` are padded to a limit; the graph sees their first `blocks` blocks.
-        `blocks` and `lengths` are bound Variables, `lengths` the valid length after
-        each of the three subsampling convs."""
+    def _encode(self, features: Tensor, *lengths: UOp) -> Tensor:
+        """Encoder frames projected for the joint, shape (frames, decoder hidden). `lengths`
+        are bound Variables: the valid length after each of the three subsampling convs."""
         w = self.w
-        longest = subsampled(features.shape[1], 3)
-        sizes = [blocks * (BLOCK >> i) for i in (1, 2, 3)]
+        sizes = [subsampled(features.shape[1], i) for i in (1, 2, 3)]
         masks = [(Tensor.arange(s) < n).float().reshape(1, 1, s, 1) for n, s in zip(lengths, sizes)]
         t = sizes[-1]
         key_mask = (Tensor.arange(t) < lengths[-1]).where(0.0, -math.inf).reshape(1, 1, 1, t)
-        rel = self._relative_keys(longest)
-        x = self._subsample(features[:, : blocks * BLOCK], masks)
+        rel = self._relative_keys(t)
+        x = self._subsample(features, masks)
         time_mask = masks[-1].reshape(1, -1, 1)
-        layer = function(self._layer, precompile=True, allow_implicit=True)
         for i in range(self.layers):
-            x = layer(x, rel[i], key_mask, time_mask, i)
-        encoded = linear(x[0], w["encoder_projector.weight"], w["encoder_projector.bias"]).half()
-        return encoded.pad(((0, longest - t), None)).realize()
-
-    def _layer(self, x: Tensor, rel: Tensor, key_mask: Tensor, time_mask: Tensor, i: int) -> Tensor:
-        """Conformer layer `i`. Its weights are implicit inputs, so every layer shares one schedule."""
-        w, p = self.w, f"encoder.layers.{i}."
-        x = x + 0.5 * self._feed_forward(layernorm(x, w[p + "norm_feed_forward1.weight"], w[p + "norm_feed_forward1.bias"]), p + "feed_forward1.")
-        x = x + self._attention(layernorm(x, w[p + "norm_self_att.weight"], w[p + "norm_self_att.bias"]), p + "self_attn.", rel, key_mask)
-        x = x + self._conv(layernorm(x, w[p + "norm_conv.weight"], w[p + "norm_conv.bias"]), p + "conv.", time_mask)
-        x = x + 0.5 * self._feed_forward(layernorm(x, w[p + "norm_feed_forward2.weight"], w[p + "norm_feed_forward2.bias"]), p + "feed_forward2.")
-        return layernorm(x, w[p + "norm_out.weight"], w[p + "norm_out.bias"])
+            p = f"encoder.layers.{i}."
+            x = x + 0.5 * self._feed_forward(layernorm(x, w[p + "norm_feed_forward1.weight"], w[p + "norm_feed_forward1.bias"]), p + "feed_forward1.")
+            x = x + self._attention(layernorm(x, w[p + "norm_self_att.weight"], w[p + "norm_self_att.bias"]), p + "self_attn.", rel[i], key_mask)
+            x = x + self._conv(layernorm(x, w[p + "norm_conv.weight"], w[p + "norm_conv.bias"]), p + "conv.", time_mask)
+            x = x + 0.5 * self._feed_forward(layernorm(x, w[p + "norm_feed_forward2.weight"], w[p + "norm_feed_forward2.bias"]), p + "feed_forward2.")
+            x = layernorm(x, w[p + "norm_out.weight"], w[p + "norm_out.bias"])
+        return linear(x[0], w["encoder_projector.weight"], w["encoder_projector.bias"]).half().realize()
 
     # Prediction network and joint
 
-    def _step(self, token: UOp, encoded: Tensor, blocks: UOp) -> Tensor:
+    def _step(self, token: UOp, encoded: Tensor) -> Tensor:
         """One LSTM step on `token` (a bound Variable), updating the LSTM state in
-        place, then the joint for the encoder frames of the first `blocks` blocks (a
-        bound Variable): shape (2, encoder frames), the best token and the best
-        duration index per frame."""
+        place, then the joint for every encoder frame: shape (2, frames), the best
+        token and the best duration index per frame."""
         w, p = self.w, "decoder."
         x = w[p + "embedding.weight"][token : token + 1].float()
         hs, cs = [], []
@@ -213,22 +174,21 @@ class Parakeet:
             hs.append(x)
             cs.append(cl)
         decoded = linear(x, w[p + "decoder_projector.weight"], w[p + "decoder_projector.bias"])
-        t = blocks * subsampled(BLOCK, 3)
-        joint = (encoded[:t].float() + decoded).relu()
+        joint = (encoded.float() + decoded).relu()
         tokens = argmax(linear(joint, w["joint.token_head.weight"], w["joint.token_head.bias"]))
         durations = linear(joint, w["joint.duration_head.weight"], w["joint.duration_head.bias"]).argmax(-1).cast(dtypes.int32)
-        out = tokens.stack(durations).pad((None, (0, encoded.shape[0] - t)))
+        out = tokens.stack(durations)
         # One realize, so the LSTM isn't recomputed for each output.
         Tensor.realize(self._h.assign(Tensor.cat(*hs)), self._c.assign(Tensor.cat(*cs)), out)
         return out
 
     # Transcription
 
-    def warm_up(self, max_frames: int = LIMIT) -> None:
-        """Captures the encoder and decoder-step JITs of every limit up to
+    def warm_up(self, max_frames: int) -> None:
+        """Captures the encoder and decoder-step JITs of every padded length up to
         `max_frames`: TinyJit runs a function on its first call and captures it on
         the second."""
-        for size in range(LIMIT, limit(max_frames) + 1, LIMIT):
+        for size in range(BUCKET, bucket(max_frames) + 1, BUCKET):
             silence = np.zeros(size * audio.HOP, np.float32)
             for _ in range(2):
                 self.generate(silence)
@@ -239,28 +199,21 @@ class Parakeet:
         frames = len(feats)
         if frames < 2:
             return []
-        size = limit(frames)
+        size = bucket(frames)
         padded = np.zeros((1, size, feats.shape[1]), np.float32)
         padded[0, :frames] = feats
 
         lengths = [subsampled(frames, i) for i in (1, 2, 3)]
         valid = lengths[-1]
         self._relative_keys(subsampled(size, 3))
-        if size not in self._variables:
-            self._variables[size] = (
-                Variable(f"blocks{size}", 1, size // BLOCK),
-                [Variable(f"length{i}_{size}", 1, subsampled(size, i)) for i in (1, 2, 3)],
-            )
-        blocks_var, length_vars = self._variables[size]
-        blocks = blocks_var.bind(math.ceil(frames / BLOCK))
         encoder = self._encoders.setdefault(size, TinyJit(self._encode))
-        encoded = encoder(Tensor(padded), blocks, *(v.bind(n) for v, n in zip(length_vars, lengths)))
+        encoded = encoder(Tensor(padded), *(v.bind(n) for v, n in zip(self._lengths, lengths)))
 
         step = self._steps.setdefault(size, TinyJit(self._step))
         Tensor.realize(self._h.assign(Tensor.zeros_like(self._h)), self._c.assign(Tensor.zeros_like(self._c)))
 
         def predict(token: int) -> np.ndarray:
-            return step(self._token.bind(token), encoded, blocks).numpy()
+            return step(self._token.bind(token), encoded).numpy()
 
         # generate() starts from the blank token, reuses the decoder's output while
         # it predicts blanks, and sizes its output by the padded feature length.
