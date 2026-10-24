@@ -1,11 +1,13 @@
-"""Bark as a server for tinybark.mojo: loads once, prints "ready", then for each
-line on stdin, the path of raw float32 16 kHz mono samples, prints "tokens [...]".
+"""Bark as a server for tinybark.mojo: main <gpu|cpu> loads once, prints "ready",
+then for each line on stdin, the path of raw float32 16 kHz mono samples, prints
+"tokens [...]".
 
-The encoder runs in fp16 on the GPU; the decoder and joint run on the CPU in
-fp32, as in tinybark's ONNX Runtime setup. Send one line at a time and wait for
+On "gpu", the encoder runs in fp16 on the GPU and the decoder and joint on the
+CPU in fp32, as in tinybark's ONNX Runtime setup. On "cpu", everything runs on
+the CPU in fp32. Send one line at a time and wait for
 its reply: input() drops lines that arrive in the same read."""
 
-from std.sys import has_accelerator
+from std.sys import argv, has_accelerator
 
 from max.gpu.host import DeviceContext
 
@@ -24,22 +26,37 @@ def read_f32(path: String) raises -> List[Float32]:
     return out^
 
 
+def next_path(mut path: String) -> Bool:
+    """The next request's samples path, or False once stdin is closed."""
+    try:
+        path = input()
+        return True
+    except:
+        return False
+
+
 def main() raises:
+    var args = argv()
+    var device = String(args[1]) if len(args) > 1 else String("gpu")
+    var features = Features()
+    var path = String()
+    if device == "cpu":
+        var model = Parakeet(Weights(weights_file()))
+        print("ready CPU", flush=True)
+        while next_path(path):
+            print("tokens", model.generate(features(read_f32(path))), flush=True)
+        return
+    if device != "gpu":
+        raise Error("device must be gpu or cpu, got " + device)
+
     if not has_accelerator():
         raise Error("no GPU found")
     var weights = Weights(weights_file(), ["decoder.", "joint."])
     var encoder = GpuEncoder(DeviceContext(), weights)
     weights.release_fp16()
     var model = Parakeet(weights^)
-    var features = Features()
     print("ready", encoder.ctx.name(), flush=True)
-
-    while True:
-        var path: String
-        try:
-            path = input()
-        except:
-            return
+    while next_path(path):
         var feats = features(read_f32(path))
         var tokens = List[Int]()
         if feats.rows >= 2:

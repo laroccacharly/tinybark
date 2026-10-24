@@ -1,9 +1,9 @@
 """Bark in Mojo: the encoder in fp16 on an AMD GPU through HIP, the decoder and
-joint on the CPU. main.mojo is built once into a binary cached in ~/.cache/tinybark
+joint on the CPU; or everything in fp32 on the CPU. main.mojo is built once into a binary cached in ~/.cache/tinybark
 (keyed by a hash of the sources and the Mojo version) and runs as a server process; Bark talks to it
 over stdin and stdout.
 
-    bark = tinybark.mojo.load()
+    bark = tinybark.mojo.load()  # or load("cpu")
     text = bark.transcribe(samples)  # 16 kHz mono float32 NumPy array
 
 Needs the `mojo` extra and ROCm's HIP runtime.
@@ -46,8 +46,8 @@ def build() -> Path:
 
 
 class Bark:
-    def __init__(self, path: Path):
-        self.process = subprocess.Popen([path], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    def __init__(self, path: Path, device: str = "gpu"):
+        self.process = subprocess.Popen([path, device], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         self.device = self._reply("ready")
         self.tokenizer = Tokenizer(weights.tokenizer_file())
         # The samples go through a file in shared memory: Mojo's input() reads lines only.
@@ -78,6 +78,6 @@ class Bark:
         self.samples.unlink(missing_ok=True)
 
 
-def load() -> Bark:
-    """Builds the binary on first use (see build()), then starts the server."""
-    return Bark(build())
+def load(device: str = "gpu") -> Bark:
+    """Builds the binary on first use (see build()), then starts the server on the "gpu" or the "cpu"."""
+    return Bark(build(), device)

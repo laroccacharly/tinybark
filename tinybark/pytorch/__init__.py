@@ -1,7 +1,7 @@
-"""Bark in transformers' ParakeetForTDT on PyTorch, in fp16 on the GPU through ROCm,
-optionally with the encoder compiled by torch.compile.
+"""Bark in transformers' ParakeetForTDT on PyTorch, in fp16 on the GPU through ROCm
+or in bf16 on the CPU, optionally with the encoder compiled by torch.compile.
 
-    bark = tinybark.pytorch.load(compile=True)
+    bark = tinybark.pytorch.load("gpu", compile=True)
     text = bark.transcribe(samples)  # 16 kHz mono float32 NumPy array
 
 Needs the `pytorch` extra, with torch from the ROCm index.
@@ -50,5 +50,9 @@ class Bark:
         return self.transcribe(np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768)
 
 
-def load(device: str = "cuda", compile: bool = False) -> Bark:
-    return Bark(device, compile=compile)
+def load(device: str = "gpu", compile: bool = False) -> Bark:
+    """On the "gpu" in fp16, or the "cpu" in bf16 (fp32 without AVX512 BF16), as stt's bark.py runs it."""
+    if device == "gpu":
+        return Bark("cuda", torch.float16, compile)
+    bf16 = getattr(torch.cpu, "_is_avx512_bf16_supported", lambda: False)()
+    return Bark("cpu", torch.bfloat16 if bf16 else torch.float32, compile)

@@ -1,9 +1,10 @@
 """Bark on ONNX Runtime, from graphs exported by `export.py` and cached in
-~/.cache/tinybark: the encoder on the GPU through WebGPU (Vulkan), the decoder
-and joint on the CPU, where their small per-step calls are fastest. Any audio
-length runs on the same graphs: no warm-up per length.
+~/.cache/tinybark: the encoder in fp16 on the GPU through WebGPU (Vulkan), or in
+fp32 on the CPU; the decoder and joint always on the CPU, where their small
+per-step calls are fastest. Any audio length runs on the same graphs: no
+warm-up per length.
 
-    bark = tinybark.ort.load()
+    bark = tinybark.ort.load()  # or load("cpu")
     text = bark.transcribe(samples)  # 16 kHz mono float32 NumPy array
 """
 
@@ -18,7 +19,7 @@ from .. import audio, weights
 from ..text import Tokenizer
 
 # Bump when export.py changes, so stale graphs aren't loaded.
-FORMAT = 2
+FORMAT = 3
 # Token <|endoftext|>, generation_config.json's eos_token_id: generate() stops on it.
 EOS = 3
 
@@ -35,7 +36,7 @@ def directory() -> Path:
 
 
 class Bark:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, device: str = "gpu"):
         config = json.loads((path / "config.json").read_text())
         self.blank = config["blank_token_id"]
         self.durations = config["durations"]
@@ -44,7 +45,10 @@ class Bark:
         options = ort.SessionOptions()
         # One thread per physical core: SMT siblings slow the matmuls down.
         options.intra_op_num_threads = max(1, (os.cpu_count() or 2) // 2)
-        self.encoder = ort.InferenceSession(path / "encoder.onnx", options, providers=["WebGpuExecutionProvider", "CPUExecutionProvider"])
+        if device == "gpu":
+            self.encoder = ort.InferenceSession(path / "encoder.onnx", options, providers=["WebGpuExecutionProvider", "CPUExecutionProvider"])
+        else:
+            self.encoder = ort.InferenceSession(path / "encoder-fp32.onnx", options, providers=["CPUExecutionProvider"])
         self.decoder, self.joint = (ort.InferenceSession(path / f"{name}.onnx", options, providers=["CPUExecutionProvider"]) for name in ("decoder", "joint"))
         self.tokenizer = Tokenizer(weights.tokenizer_file())
 
@@ -99,5 +103,5 @@ def prepare() -> Path:
     return path
 
 
-def load() -> Bark:
-    return Bark(prepare())
+def load(device: str = "gpu") -> Bark:
+    return Bark(prepare(), device)
